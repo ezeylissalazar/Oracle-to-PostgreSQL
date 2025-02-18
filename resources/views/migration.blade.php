@@ -137,13 +137,24 @@
                                             </td>
                                             <td class="px-4 py-3 text-sm">
                                                 <div class="flex flex-col items-center justify-center w-full space-y-2">
+                                                    {{-- Botón para migrar estructura --}}
                                                     <form
-                                                        action="{{ route('migration.migrate', ['table' => $table->table_name]) }}"
+                                                        action="{{ route('migration.migrateStructure', ['table' => $table->table_name]) }}"
                                                         method="POST" class="w-full">
                                                         @csrf
                                                         <button
-                                                            class="w-full flex items-center justify-center px-4 py-2 text-sm font-medium leading-5 text-white transition-colors duration-150 bg-purple-600 border border-transparent rounded-lg active:bg-purple-600 hover:bg-purple-700 focus:outline-none focus:shadow-outline-purple">
-                                                            Migrar
+                                                            class="w-full flex items-center justify-center px-4 py-2 text-sm font-medium leading-5 text-white transition-colors duration-150 bg-blue-600 border border-transparent rounded-lg active:bg-blue-600 hover:bg-blue-700 focus:outline-none focus:shadow-outline-blue">
+                                                            Migrar Estructura
+                                                        </button>
+                                                    </form>
+                                                    {{-- Botón para migrar datos --}}
+                                                    <form
+                                                        action="{{ route('migration.migrateData', ['table' => $table->table_name]) }}"
+                                                        method="POST" class="w-full">
+                                                        @csrf
+                                                        <button
+                                                            class="w-full flex items-center justify-center px-4 py-2 text-sm font-medium leading-5 text-white transition-colors duration-150 bg-teal-600 border border-transparent rounded-lg active:bg-teal-600 hover:bg-green-700 focus:outline-none focus:shadow-outline-green">
+                                                            Migrar Datos
                                                         </button>
                                                     </form>
                                                     @if ($isMigrated)
