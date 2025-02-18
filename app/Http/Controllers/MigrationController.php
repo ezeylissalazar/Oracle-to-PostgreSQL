@@ -74,49 +74,103 @@ class MigrationController extends Controller
 
     public function migrateData($table)
     {
+
         try {
-            $table = $this->toLowerCase($table); // Asegurar que el nombre de la tabla esté en minúsculas
-    
-            // Verificar si la tabla existe en PostgreSQL
-            $tableExists = DB::connection('pgsql')->select("SELECT to_regclass('public.{$table}') as exists");
-            if (empty($tableExists) || is_null($tableExists[0]->exists)) {
-                return back()->with('error', "La tabla {$table} no existe en PostgreSQL.");
+            $table = $this->toLowerCase($table);
+            // Obtener la clave primaria de la tabla
+            $primaryKeyQuery = DB::connection('pgsql')->select("
+        SELECT column_name
+        FROM information_schema.key_column_usage
+        WHERE table_name = :table
+        AND constraint_name = (
+            SELECT constraint_name
+            FROM information_schema.table_constraints
+            WHERE table_name = :table
+            AND constraint_type = 'PRIMARY KEY'
+            LIMIT 1
+        )
+        ", ['table' => $table]);
+
+            // Verificar si encontramos la clave primaria
+            if (empty($primaryKeyQuery)) {
+                throw new \Exception("No se encontró una clave primaria para la tabla {$table}");
             }
-    
-            // Obtener los datos desde Oracle
+
+            $primaryKeyColumn = $primaryKeyQuery[0]->column_name;
             $oracleData = DB::connection('oracle')->select("SELECT * FROM " . $this->toUpperCase($table));
-    
-            if (empty($oracleData)) {
-                return back()->with('error', "No hay datos en la tabla {$table} para migrar.");
-            }
-    
+
+            // Suponiendo que $oracleData contiene los datos que estamos migrando
             foreach ($oracleData as $row) {
                 $rowArray = (array) $row;
                 $rowArray = array_change_key_case($rowArray, CASE_LOWER); // Convertir claves a minúsculas
-    
+
                 // Obtener claves y valores
                 $columns = array_keys($rowArray);
                 $values = array_values($rowArray);
-    
-                // Construcción dinámica de INSERT ON CONFLICT
+
+                // Construcción dinámica de la sentencia INSERT ON CONFLICT
                 $updateSet = implode(', ', array_map(fn($col) => "$col = excluded.$col", $columns));
-    
                 $placeholders = implode(', ', array_fill(0, count($values), '?'));
                 $columnNames = implode(', ', $columns);
-    
+
+                // Usar la clave primaria para la cláusula ON CONFLICT
                 $sql = "INSERT INTO {$table} ({$columnNames}) VALUES ({$placeholders}) 
-                        ON CONFLICT (id_empleado) DO UPDATE SET {$updateSet};";
-    
+                ON CONFLICT ({$primaryKeyColumn}) DO UPDATE SET {$updateSet};";
+
+                // Ejecutar la consulta con los valores
                 DB::connection('pgsql')->statement($sql, $values);
             }
-    
             return back()->with('success', "Datos de la tabla {$table} migrados correctamente.");
         } catch (\Exception $e) {
             return back()->with('error', "Error al migrar datos de la tabla {$table}: " . $e->getMessage());
         }
     }
-    
-    
+
+    // public function migrateData($table)
+    // {
+    //     try {
+    //         $table = $this->toLowerCase($table); // Asegurar que el nombre de la tabla esté en minúsculas
+
+    //         // Verificar si la tabla existe en PostgreSQL
+    //         $tableExists = DB::connection('pgsql')->select("SELECT to_regclass('public.{$table}') as exists");
+    //         if (empty($tableExists) || is_null($tableExists[0]->exists)) {
+    //             return back()->with('error', "La tabla {$table} no existe en PostgreSQL.");
+    //         }
+
+    //         // Obtener los datos desde Oracle
+    //         $oracleData = DB::connection('oracle')->select("SELECT * FROM " . $this->toUpperCase($table));
+
+    //         if (empty($oracleData)) {
+    //             return back()->with('error', "No hay datos en la tabla {$table} para migrar.");
+    //         }
+
+    //         foreach ($oracleData as $row) {
+    //             $rowArray = (array) $row;
+    //             $rowArray = array_change_key_case($rowArray, CASE_LOWER); // Convertir claves a minúsculas
+
+    //             // Obtener claves y valores
+    //             $columns = array_keys($rowArray);
+    //             $values = array_values($rowArray);
+
+    //             // Construcción dinámica de INSERT ON CONFLICT
+    //             $updateSet = implode(', ', array_map(fn($col) => "$col = excluded.$col", $columns));
+
+    //             $placeholders = implode(', ', array_fill(0, count($values), '?'));
+    //             $columnNames = implode(', ', $columns);
+
+    //             $sql = "INSERT INTO {$table} ({$columnNames}) VALUES ({$placeholders}) 
+    //                     ON CONFLICT (id_empleado) DO UPDATE SET {$updateSet};";
+
+    //             DB::connection('pgsql')->statement($sql, $values);
+    //         }
+
+    //         return back()->with('success', "Datos de la tabla {$table} migrados correctamente.");
+    //     } catch (\Exception $e) {
+    //         return back()->with('error', "Error al migrar datos de la tabla {$table}: " . $e->getMessage());
+    //     }
+    // }
+
+
 
 
     private function toLowerCase($name)
@@ -191,6 +245,13 @@ class MigrationController extends Controller
         $postgresDDL = str_ireplace('RAW', 'BYTEA', $postgresDDL);
         $postgresDDL = str_ireplace('DATE', 'TIMESTAMP', $postgresDDL);
 
+        // Conversión para CLOB y BLOB de Oracle
+        $postgresDDL = str_ireplace('CLOB', 'TEXT', $postgresDDL); // Oracle CLOB -> PostgreSQL TEXT
+        $postgresDDL = str_ireplace('BLOB', 'BYTEA', $postgresDDL); // Oracle BLOB -> PostgreSQL BYTEA
+
+        // Eliminar la sintaxis LOB de Oracle, ya que no se utiliza en PostgreSQL
+        $postgresDDL = preg_replace('/\s*lob\s*\([^\)]+\)\s*store\s*as\s*basicfile\s*\([^\)]*\)/i', '', $postgresDDL);
+
         // Convertir comillas dobles de Oracle a minúsculas en PostgreSQL
         $postgresDDL = preg_replace_callback('/"([^"]+)"/', function ($matches) {
             return '"' . strtolower($matches[1]) . '"';
@@ -208,8 +269,6 @@ class MigrationController extends Controller
 
         return $postgresDDL;
     }
-
-
 
 
     public function migrateStructureToPostgres($tableName)
