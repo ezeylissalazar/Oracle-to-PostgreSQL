@@ -12,6 +12,7 @@ class HistoryMigration extends Model
     protected $fillable = [
         'migrated_table',
         'fecha_migration',
+        'tipo_migracion',
         'cantidad_migracion',
         'updated_at',
     ];

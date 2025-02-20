@@ -16,6 +16,7 @@ return new class extends Migration
             $table->string('migrated_table');
             $table->date('fecha_migration');
             $table->integer('cantidad_migracion')->default(1);
+            $table->string('tipo_migracion');
             $table->timestamps();
         });
     }
