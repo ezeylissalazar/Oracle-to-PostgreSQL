@@ -3,9 +3,11 @@
 namespace App\Http\Controllers;
 
 use App\Models\HistoryMigration;
+use Doctrine\Inflector\InflectorFactory;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class MigrationController extends Controller
 {
@@ -56,77 +58,103 @@ class MigrationController extends Controller
             ->toArray();
 
         // Obtener las columnas de cada tabla migrada en PostgreSQL
+        // Obtener las columnas de cada tabla migrada en PostgreSQL
         $pgsqlColumns = [];
         foreach ($migratedTables as $tableName) {
+            $pluralTableName = $tableName . 's'; // Suponiendo que Laravel agregue una 's' a las tablas
+
             $pgsqlColumns[$tableName] = DB::connection('pgsql')->select("
         SELECT column_name 
         FROM information_schema.columns 
-        WHERE LOWER(table_name) = LOWER(:table_name) 
+        WHERE LOWER(table_name) IN (LOWER(:table_name), LOWER(:plural_table_name)) 
         AND table_schema = 'public'
         ORDER BY ordinal_position
-    ", ['table_name' => strtolower($tableName)]);
+    ", ['table_name' => strtolower($tableName), 'plural_table_name' => strtolower($pluralTableName)]);
         }
 
 
+        $pgsqlTables = [];
+        foreach ($oracleTables as $table) {
+            $tableNameLower = strtolower($table->table_name);
 
-        return view('migration', compact('oracleTables', 'columns', 'migratedTables', 'pgsqlColumns'));
+            // Si el nombre ya termina en "s", lo dejamos igual
+            if (substr($tableNameLower, -1) === 's') {
+                $pgsqlTables[$tableNameLower] = $tableNameLower;
+            } else {
+                $pgsqlTables[$tableNameLower] = $tableNameLower . 's'; // Agregar "s" solo si no la tiene
+            }
+        }
+
+        return view('migration', compact('oracleTables', 'columns', 'migratedTables', 'pgsqlColumns', 'pgsqlTables'));
     }
 
     public function migrateData($table)
     {
-
         try {
-            $tipo = 'Migracion Data';
-            $table = $this->toLowerCase($table);
-            // Obtener la clave primaria de la tabla
-            $primaryKeyQuery = DB::connection('pgsql')->select("
-        SELECT column_name
-        FROM information_schema.key_column_usage
-        WHERE table_name = :table
-        AND constraint_name = (
-            SELECT constraint_name
-            FROM information_schema.table_constraints
-            WHERE table_name = :table
-            AND constraint_type = 'PRIMARY KEY'
-            LIMIT 1
-        )
-        ", ['table' => $table]);
+            // Convertir el nombre de la tabla de Oracle a minúsculas
+            $tableOracle = $this->toLowerCase($table);
 
-            // Verificar si encontramos la clave primaria
-            if (empty($primaryKeyQuery)) {
-                throw new \Exception("No se encontró una clave primaria para la tabla {$table}");
+            // Verificar si la tabla de Oracle ya está en plural
+            if (substr($tableOracle, -1) !== 's') {
+                $tablePgsql = $tableOracle . 's';  // Si no está en plural, le agregamos 's'
+            } else {
+                $tablePgsql = $tableOracle;  // Si ya está en plural, dejamos el nombre tal cual
             }
 
-            $primaryKeyColumn = $primaryKeyQuery[0]->column_name;
-            $oracleData = DB::connection('oracle')->select("SELECT * FROM " . $this->toUpperCase($table));
+            // Obtener los datos de Oracle
+            $oracleData = DB::connection('oracle')->select("SELECT * FROM " . $this->toUpperCase($tableOracle));
 
-            // Suponiendo que $oracleData contiene los datos que estamos migrando
+            // Verificar si se han encontrado datos
+            if (empty($oracleData)) {
+                throw new \Exception("No se encontraron datos en la tabla Oracle {$tableOracle}");
+            }
+
+            // Obtener las columnas de la tabla PostgreSQL
+            $columnsQuery = DB::connection('pgsql')->select("
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = :table
+                ", ['table' => $tablePgsql]);
+
+            // Verificar si se encontraron columnas en PostgreSQL
+            if (empty($columnsQuery)) {
+                throw new \Exception("No se encontraron columnas en la tabla PostgreSQL {$tablePgsql}");
+            }
+
+            // Obtener solo los nombres de las columnas en PostgreSQL
+            $pgsqlColumns = array_map(fn($col) => $col->column_name, $columnsQuery);
+
+            // Insertar los datos de Oracle en PostgreSQL
             foreach ($oracleData as $row) {
                 $rowArray = (array) $row;
-                $rowArray = array_change_key_case($rowArray, CASE_LOWER); // Convertir claves a minúsculas
+                $rowArray = array_change_key_case($rowArray, CASE_LOWER); // Convertir las claves a minúsculas
 
-                // Obtener claves y valores
-                $columns = array_keys($rowArray);
-                $values = array_values($rowArray);
+                // Filtrar los valores de Oracle para que coincidan con el número de columnas en PostgreSQL
+                $columns = array_slice($rowArray, 0, count($pgsqlColumns));
+                $values = array_values($columns);
 
-                // Construcción dinámica de la sentencia INSERT ON CONFLICT
-                $updateSet = implode(', ', array_map(fn($col) => "$col = excluded.$col", $columns));
+                // Construcción dinámica de la sentencia INSERT
                 $placeholders = implode(', ', array_fill(0, count($values), '?'));
-                $columnNames = implode(', ', $columns);
+                $columnNames = implode(', ', $pgsqlColumns);
 
-                // Usar la clave primaria para la cláusula ON CONFLICT
-                $sql = "INSERT INTO {$table} ({$columnNames}) VALUES ({$placeholders}) 
-                ON CONFLICT ({$primaryKeyColumn}) DO UPDATE SET {$updateSet};";
+                // Mostrar los datos para depuración
+                // dd($tablePgsql, $columnNames, $placeholders, $pgsqlColumns, $values, $row);
+
+                $sql = "INSERT INTO {$tablePgsql} ({$columnNames}) VALUES ({$placeholders})";
 
                 // Ejecutar la consulta con los valores
                 DB::connection('pgsql')->statement($sql, $values);
-                $this->registerMigration($table, $tipo);
             }
-            return back()->with('success', "Datos de la tabla {$table} migrados correctamente.");
+
+            return back()->with('success', "Datos de la tabla {$tablePgsql} migrados correctamente.");
         } catch (\Exception $e) {
             return back()->with('error', "Error al migrar datos de la tabla {$table}: " . $e->getMessage());
         }
     }
+
+
+
+
 
     private function toLowerCase($name)
     {
@@ -141,12 +169,19 @@ class MigrationController extends Controller
 
     public function tableExists($tableName)
     {
+        $tableName = $this->toLowerCase($tableName);
+
+        if (substr($tableName, -1) !== 's') {
+            $tablePgsql = $tableName . 's';  // Si no está en plural, le agregamos 's'
+        } else {
+            $tablePgsql = $tableName;  // Si ya está en plural, dejamos el nombre tal cual
+        }
         // Consultar si la tabla existe en PostgreSQL en el esquema 'public'
         $result = DB::connection('pgsql')->select("
             SELECT table_name
             FROM information_schema.tables
             WHERE table_name = :table_name AND table_schema = 'public'
-        ", ['table_name' => strtolower($tableName)]);
+        ", ['table_name' => strtolower($tablePgsql)]);
 
         // Si la tabla existe, devuelve true
         return count($result) > 0;
@@ -218,6 +253,7 @@ class MigrationController extends Controller
         $postgresDDL = preg_replace('/STORAGE\s*\([^\)]*\)/i', '', $postgresDDL);
         $postgresDDL = preg_replace('/TABLESPACE\s*["\w]+/i', '', $postgresDDL);
         $postgresDDL = preg_replace('/\bNUMBER\b/i', 'NUMERIC', $postgresDDL);
+        $postgresDDL = preg_replace('/segment\s*creation\s*immediate/i', '', $postgresDDL);
 
         // Reemplazar tipos de datos y otras sintaxis específicas de Oracle
         $postgresDDL = preg_replace('/NUMBER\((\d+),0\)/i', 'BIGINT', $postgresDDL); // Oracle NUMBER(19,0) -> PostgreSQL BIGINT
@@ -282,32 +318,42 @@ class MigrationController extends Controller
             $tipo = 'Migracion Estructura';
             if ($this->tableExists($tableName)) {
                 $tableName = $this->toLowerCase($tableName);
+
+                if (substr($tableName, -1) !== 's') {
+                    $tablePgsql = $tableName . 's';  // Si no está en plural, le agregamos 's'
+                } else {
+                    $tablePgsql = $tableName;  // Si ya está en plural, dejamos el nombre tal cual
+                }
                 $oracleDDL = $this->getTableDDL($tableName); // Obtén el DDL de Oracle
                 $postgresDDL = $this->convertOracleToPostgres($oracleDDL); // Convierte a PostgreSQL
-                $currentPostgresDDL = $this->getPostgresTableDDL($tableName);
+
+                $postgresDDL = $this->transformTableAndColumnNames($postgresDDL);
+
+                $currentPostgresDDL = $this->getPostgresTableDDL($tablePgsql);
 
                 // Normalizamos los DDLs
                 $normalizedPostgresDDL = $this->normalizeDDL($currentPostgresDDL);
                 $normalizedOracleDDL = strtolower($this->normalizeDDL($postgresDDL));
-
                 // Verificar si la tabla existe
                 if ($normalizedPostgresDDL !== $normalizedOracleDDL) {
                     // Eliminar la tabla existente
-                    DB::connection('pgsql')->statement("DROP TABLE IF EXISTS public.$tableName CASCADE");
+                    DB::connection('pgsql')->statement("DROP TABLE IF EXISTS public.$tablePgsql CASCADE");
 
                     // Crear la nueva tabla
                     DB::connection('pgsql')->statement($postgresDDL);
+                    $this->migrateData($tableName);
 
-                    $mensaje = 'La tabla ' . $tableName . ' ha sido actualizada correctamente.';
+                    $mensaje = 'La tabla ' . $tablePgsql . ' ha sido actualizada correctamente.';
                 } else {
                     // Si los DDLs coinciden, no hacer nada
-                    $mensaje = 'La tabla ' . $tableName . ' ya está actualizada, no se realizaron cambios.';
+                    $mensaje = 'La tabla ' . $tablePgsql . ' ya está actualizada, no se realizaron cambios.';
                 }
             } else {
                 // Convertir el nombre de la tabla a minúsculas
                 $tableName = $this->toLowerCase($tableName);
                 $oracleDDL = $this->getTableDDL($tableName); // Obtén el DDL de Oracle
                 $postgresDDL = $this->convertOracleToPostgres($oracleDDL); // Convierte a PostgreSQL
+                $postgresDDL = $this->transformTableAndColumnNames($postgresDDL);
 
                 // Ejecuta el DDL convertido en PostgreSQL
                 DB::connection('pgsql')->statement($postgresDDL);
@@ -320,6 +366,96 @@ class MigrationController extends Controller
         } catch (\Exception $e) {
             return redirect()->route('migration.index')->with('error', 'Error migracion: ' . $e->getMessage());
         }
+    }
+
+
+    function transformTableAndColumnNames($postgresDDL)
+    {
+
+        // // Extraer el nombre de la tabla usando regex
+        if (!preg_match('/create table\s+"[^"]+"\."([^"]+)"/i', $postgresDDL, $matches)) {
+            return $postgresDDL; // Si no encuentra coincidencias, retorna el original
+        }
+
+        $tableName = $matches[1];
+
+        // Usar Doctrine Inflector para pluralizar
+        $inflector = InflectorFactory::create()->build();
+        $pluralTableName = $inflector->pluralize($tableName);
+
+        // Si el nombre cambió, reemplazar en el DDL
+        if ($tableName !== $pluralTableName) {
+            $postgresDDL = str_replace("\"$tableName\"", "\"$pluralTableName\"", $postgresDDL);
+        }
+
+        // Transformar claves primarias (PRIMARY KEY)
+        preg_match_all('/CONSTRAINT\s+"?(\S+)"?\s+PRIMARY KEY\s*\(([^)]+)\)/i', $postgresDDL, $matches, PREG_SET_ORDER);
+
+        if (!$matches) {
+            return $postgresDDL; // No hay claves primarias, retornar el DDL original
+        }
+
+        $primaryKeys = [];
+        foreach ($matches as $match) {
+            // Extraer los nombres de las columnas PRIMARY KEY
+            $keys = array_map('trim', explode(',', str_replace('"', '', $match[2])));
+            $primaryKeys = array_merge($primaryKeys, $keys);
+        }
+
+        if (count($primaryKeys) > 0) {
+            $firstPK = $primaryKeys[0]; // Primera clave primaria
+            $postgresDDL = preg_replace('/\b' . preg_quote($firstPK, '/') . '\b/', 'id', $postgresDDL);
+        }
+
+
+        // Transformar claves foráneas (FOREIGN KEY)
+        preg_match_all('/CONSTRAINT\s+"?(\S+)"?\s+FOREIGN KEY\s*\(([^)]+)\)\s+REFERENCES\s+"?([^"]+)"?\.?"?([^"]+)"/i', $postgresDDL, $foreignMatches, PREG_SET_ORDER);
+
+        foreach ($foreignMatches as $foreignMatch) {
+            $columnName = trim($foreignMatch[2], '"'); // Nombre original del campo FK
+            $referencedSchema = trim($foreignMatch[3], '"'); // Esquema referenciado (si existe)
+            $referencedTable = trim($foreignMatch[4], '"'); // Tabla referenciada
+
+            // Singularizamos y convertimos a minúsculas
+            $referencedTableSingular = strtolower(rtrim($referencedTable, 's')); // Singularizamos y minúsculas
+
+            // Renombrar la columna foránea según la regla "nombreTabla_id"
+            $newColumnName = $referencedTableSingular . "_id";
+
+            // Reemplazar solo si el nombre de la clave foránea no sigue el formato correcto
+            if ($columnName !== $newColumnName) {
+                $postgresDDL = str_replace("\"$columnName\"", "\"$newColumnName\"", $postgresDDL);
+            }
+        }
+
+        // Extraemos el nombre de la tabla para comprobar
+
+        $tablePrefix = strtolower($tableName); // Prefijo de la tabla (por ejemplo, "adi")
+
+
+
+        // Buscar nombres de columnas dentro del CREATE TABLE
+        preg_match_all('/"([^"]+)"/i', $postgresDDL, $columnMatches);
+
+        if (!isset($columnMatches[1])) {
+            return $postgresDDL; // Si no hay columnas, devolvemos el original
+        }
+
+        // Recorrer las columnas y eliminar el prefijo si lo tienen
+        foreach ($columnMatches[1] as $columnName) {
+            // Comprobar si el nombre de la columna empieza con el prefijo de la tabla seguido de "_"
+            if (strpos(strtolower($columnName), $tablePrefix . '_') === 0) {
+                // Eliminar solo el prefijo y el "_"
+                $newColumnName = substr($columnName, strlen($tablePrefix) + 1);
+
+                // Asegurar que el nuevo nombre no quede vacío antes de reemplazar
+                if (!empty($newColumnName)) {
+                    $postgresDDL = str_replace("\"$columnName\"", "\"$newColumnName\"", $postgresDDL);
+                }
+            }
+        }
+
+        return $postgresDDL;
     }
 
     public function registerMigration($tableName, $tipo)
@@ -343,5 +479,58 @@ class MigrationController extends Controller
         } catch (\Exception $e) {
             return redirect()->route('migration.index')->with('error', 'Error al insertar en histórico de migración: ' . $e->getMessage());
         }
+    }
+
+
+    // ---------------------------------------- HOMOLOGACION EN BASE A REGLAS DE LARAVEL ---------------------------------------- //
+
+    function extractColumnsFromDDL($ddl)
+    {
+        preg_match_all('/"(.*?)"/', $ddl, $matches);
+        return array_map('trim', $matches[1]); // Devuelve los nombres de las columnas
+    }
+
+    function extractConstraintsFromDDL($ddl)
+    {
+        $constraints = [];
+
+        if (preg_match('/PRIMARY KEY \("(.*?)"\)/', $ddl, $pkMatch)) {
+            $constraints[] = ['type' => 'primary', 'column' => $pkMatch[1]];
+        }
+
+        if (preg_match_all('/FOREIGN KEY \("(.*?)"\) REFERENCES "(.*?)"/', $ddl, $fkMatches, PREG_SET_ORDER)) {
+            foreach ($fkMatches as $fkMatch) {
+                $constraints[] = ['type' => 'foreign', 'column' => $fkMatch[1], 'references' => $fkMatch[2]];
+            }
+        }
+
+        return $constraints;
+    }
+
+    function normalizeLaravelNaming($table, $columns, $constraints)
+    {
+        $normalizedTable = Str::snake(Str::singular($table)); // Laravel usa snake_case y nombres en singular
+        $normalizedColumns = [];
+        foreach ($columns as $column) {
+            $newName = Str::snake($column);
+            if (in_array($column, array_column($constraints, 'column'))) {
+                // Si es clave primaria, cambiar a 'id'
+                $newName = 'id';
+            } elseif ($foreign = array_filter($constraints, fn($c) => $c['column'] === $column && $c['type'] === 'foreign')) {
+                // Si es clave foránea, cambiar a 'tabla_referenciada_id'
+                $newName = Str::snake($foreign[0]['references']) . '_id';
+            }
+            $normalizedColumns[$column] = $newName;
+        }
+
+        return ['table' => $normalizedTable, 'columns' => $normalizedColumns];
+    }
+
+    function applyNormalizationToDDL($ddl, $columns, $table)
+    {
+        foreach ($columns as $original => $normalized) {
+            $ddl = str_replace("\"$original\"", "\"$normalized\"", $ddl);
+        }
+        return str_replace("TABLE \"$table\"", "TABLE \"$table\"", $ddl);
     }
 }
