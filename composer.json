@@ -12,6 +12,7 @@
         "php": "^8.2",
         "laravel/framework": "^11.31",
         "laravel/tinker": "^2.9",
+        "livewire/livewire": "^3.6",
         "yajra/laravel-oci8": "11"
     },
     "require-dev": {
