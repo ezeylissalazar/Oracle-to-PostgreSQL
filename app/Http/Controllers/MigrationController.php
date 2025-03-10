@@ -15,7 +15,6 @@ class MigrationController extends Controller
     public function index(Request $request)
     {
         $search = $request->input('search');
-
         $schema = env('DB_SCHEMA_PREFIX', 'BIPWORK2');
 
         // Consulta base para obtener las tablas de Oracle
@@ -26,19 +25,17 @@ class MigrationController extends Controller
             ->orderBy(DB::raw('"OWNER"')) // Aquí quitamos alias incorrectos
             ->orderBy(DB::raw('"TABLE_NAME"'));
 
-
-
         // Si hay una búsqueda, agregamos filtros adicionales con where()
         if ($search) {
             $oracleTablesQuery->where(function ($query) use ($search) {
-                $query->where(DB::raw('LOWER(ac.owner)'), 'like', '%' . strtolower($search) . '%')
-                    ->orWhere(DB::raw('LOWER(ac.table_name)'), 'like', '%' . strtolower($search) . '%');
+                $query->where(DB::raw('LOWER("OWNER")'), 'like', '%' . strtolower($search) . '%')
+                    ->orWhere(DB::raw('LOWER("TABLE_NAME")'), 'like', '%' . strtolower($search) . '%');
             });
         }
 
         $oracleTables = $oracleTablesQuery->paginate(10);
 
-        // Obtener las columnas de cada tabla
+        // Obtener las columnas de cada tabla de Oracle
         $columns = [];
         foreach ($oracleTables as $table) {
             $columns[$table->table_name] = DB::connection('oracle')->select("
@@ -50,43 +47,41 @@ class MigrationController extends Controller
             ", ['table_name' => $table->table_name, 'schema' => $schema]);
         }
 
-        // Obtener las tablas migradas desde PostgreSQL (los nombres de tablas estarán en minúsculas)
-        $migratedTables = DB::connection('pgsql')
-            ->table('history_migrations')
-            ->pluck('migrated_table')
-            ->map(fn($table) => strtolower($table)) // Convertir a minúsculas
-            ->toArray();
-
-        // Obtener las columnas de cada tabla migrada en PostgreSQL
-        // Obtener las columnas de cada tabla migrada en PostgreSQL
-        $pgsqlColumns = [];
-        foreach ($migratedTables as $tableName) {
-            $pluralTableName = $tableName . 's'; // Suponiendo que Laravel agregue una 's' a las tablas
-
-            $pgsqlColumns[$tableName] = DB::connection('pgsql')->select("
-        SELECT column_name 
-        FROM information_schema.columns 
-        WHERE LOWER(table_name) IN (LOWER(:table_name), LOWER(:plural_table_name)) 
-        AND table_schema = 'public'
-        ORDER BY ordinal_position
-    ", ['table_name' => strtolower($tableName), 'plural_table_name' => strtolower($pluralTableName)]);
-        }
-
-
+        // Consultar la tabla `history_migration` para obtener las migraciones
+        $migrations = DB::connection('pgsql')  // Asegúrate de usar la conexión correcta (pgsql)
+        ->table('history_migrations')
+        ->select('migrated_table_oracle', 'migrated_table_pgsql')
+        ->whereRaw('created_at = (SELECT MAX(created_at) FROM history_migrations AS h2 WHERE h2.migrated_table_oracle = history_migrations.migrated_table_oracle)')
+        ->pluck('migrated_table_pgsql', 'migrated_table_oracle')
+        ->mapWithKeys(fn($pgsqlTable, $oracleTable) => [strtolower($oracleTable) => $pgsqlTable]);
+    
+    
+        // Obtener los nombres de las tablas en PostgreSQL
         $pgsqlTables = [];
+        $pgsqlColumns = [];
+
         foreach ($oracleTables as $table) {
             $tableNameLower = strtolower($table->table_name);
 
-            // Si el nombre ya termina en "s", lo dejamos igual
-            if (substr($tableNameLower, -1) === 's') {
-                $pgsqlTables[$tableNameLower] = $tableNameLower;
-            } else {
-                $pgsqlTables[$tableNameLower] = $tableNameLower . 's'; // Agregar "s" solo si no la tiene
+            if (isset($migrations[$tableNameLower])) {
+                $pgsqlTableName = $migrations[$tableNameLower];
+                $pgsqlTables[$tableNameLower] = $pgsqlTableName;
+
+                // Consultar las columnas de la tabla migrada en PostgreSQL
+                $pgsqlColumns[$tableNameLower] = DB::connection('pgsql')->select("
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = :table_name
+                ORDER BY ordinal_position
+            ", ['table_name' => $pgsqlTableName]);
             }
         }
 
-        return view('migration', compact('oracleTables', 'columns', 'migratedTables', 'pgsqlColumns', 'pgsqlTables'));
+
+
+        return view('migration', compact('oracleTables', 'columns', 'pgsqlColumns', 'pgsqlTables'));
     }
+
 
     public function migrateData($table)
     {
@@ -151,6 +146,83 @@ class MigrationController extends Controller
             return back()->with('error', "Error al migrar datos de la tabla {$table}: " . $e->getMessage());
         }
     }
+
+    public function migrateDataExist($tableOracle, $tablePgsql)
+    {
+        try {
+            // Obtener los datos de Oracle
+            $oracleData = DB::connection('oracle')->select("SELECT * FROM " . $this->toUpperCase($tableOracle));
+
+            // Verificar si hay datos en Oracle
+            if (empty($oracleData)) {
+                throw new \Exception("No se encontraron datos en la tabla Oracle {$tableOracle}");
+            }
+
+            // Obtener las columnas de la tabla PostgreSQL
+            $columnsQuery = DB::connection('pgsql')->select("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = :table ORDER BY ordinal_position", ['table' => $tablePgsql]);
+
+            // Verificar si hay columnas en PostgreSQL
+            if (empty($columnsQuery)) {
+                throw new \Exception("No se encontraron columnas en la tabla PostgreSQL {$tablePgsql}");
+            }
+
+            // Obtener solo los nombres de las columnas en PostgreSQL
+            $pgsqlColumns = array_map(fn($col) => $col->column_name, $columnsQuery);
+            $pgsqlColumnTypes = array_map(fn($col) => $col->data_type, $columnsQuery);
+            $columnCount = count($pgsqlColumns); // Número total de columnas en PostgreSQL
+
+            // Insertar o actualizar los datos de Oracle en PostgreSQL
+            foreach ($oracleData as $row) {
+                $rowArray = array_values((array) $row); // Extraer solo los valores (ignorar nombres)
+
+                // Llenar las columnas en PostgreSQL que no están en Oracle con NULL
+                $values = array_pad($rowArray, $columnCount, null);
+
+                // Si la tabla tiene un campo 'created_at' o 'updated_at', asignar la fecha actual
+                if (in_array('created_at', $pgsqlColumns)) {
+                    $createdAtIndex = array_search('created_at', $pgsqlColumns);
+                    $values[$createdAtIndex] = now(); // Asignar la fecha actual a 'created_at'
+                }
+
+                if (in_array('updated_at', $pgsqlColumns)) {
+                    $updatedAtIndex = array_search('updated_at', $pgsqlColumns);
+                    $values[$updatedAtIndex] = now(); // Asignar la fecha actual a 'updated_at'
+                }
+
+                // Asignar 'false' a los campos booleanos si no hay valor de Oracle
+                foreach ($pgsqlColumnTypes as $index => $type) {
+                    if ($type === 'boolean' && $values[$index] === null) {
+                        $values[$index] = false; // Si el valor es nulo, asignamos 'false'
+                    }
+                }
+
+                // Construcción dinámica de la sentencia INSERT/UPDATE
+                $placeholders = implode(', ', array_fill(0, count($values), '?'));
+                $columnNames = implode(', ', $pgsqlColumns);
+
+
+                // Verificar si la tabla tiene una clave primaria (suponiendo que la clave primaria es 'id')
+                $primaryKey = 'id'; // Cambia esto por el nombre de tu clave primaria si es diferente
+                $updateColumns = array_map(fn($col) => "{$col} = EXCLUDED.{$col}", $pgsqlColumns);
+                $updateSet = implode(', ', $updateColumns);
+
+                $sql = "INSERT INTO {$tablePgsql} ({$columnNames}) VALUES ({$placeholders}) 
+                        ON CONFLICT ({$primaryKey}) 
+                        DO UPDATE SET {$updateSet}";
+
+                // Ejecutar la consulta con los valores
+                DB::connection('pgsql')->statement($sql, $values);
+            }
+
+            return back()->with('success', "Datos de la tabla {$tablePgsql} migrados correctamente.");
+        } catch (\Exception $e) {
+            return back()->with('error', "Error al migrar datos de la tabla {$tablePgsql}: " . $e->getMessage());
+        }
+    }
+
+
+
+
 
 
 
@@ -311,7 +383,7 @@ class MigrationController extends Controller
 
 
 
-    public function migrateStructureToPostgres($tableName)
+    public function migrateStructureToPostgres($tableName, $migrationCustomize = false)
     {
         try {
             $mensaje = '';
@@ -329,24 +401,28 @@ class MigrationController extends Controller
 
                 $postgresDDL = $this->transformTableAndColumnNames($postgresDDL);
 
-                $currentPostgresDDL = $this->getPostgresTableDDL($tablePgsql);
-
-                // Normalizamos los DDLs
-                $normalizedPostgresDDL = $this->normalizeDDL($currentPostgresDDL);
-                $normalizedOracleDDL = strtolower($this->normalizeDDL($postgresDDL));
-                // Verificar si la tabla existe
-                if ($normalizedPostgresDDL !== $normalizedOracleDDL) {
-                    // Eliminar la tabla existente
-                    DB::connection('pgsql')->statement("DROP TABLE IF EXISTS public.$tablePgsql CASCADE");
-
-                    // Crear la nueva tabla
-                    DB::connection('pgsql')->statement($postgresDDL);
-                    $this->migrateData($tableName);
-
-                    $mensaje = 'La tabla ' . $tablePgsql . ' ha sido actualizada correctamente.';
+                if ($migrationCustomize == true) {
+                    return $postgresDDL;
                 } else {
-                    // Si los DDLs coinciden, no hacer nada
-                    $mensaje = 'La tabla ' . $tablePgsql . ' ya está actualizada, no se realizaron cambios.';
+                    $currentPostgresDDL = $this->getPostgresTableDDL($tablePgsql);
+
+                    // Normalizamos los DDLs
+                    $normalizedPostgresDDL = $this->normalizeDDL($currentPostgresDDL);
+                    $normalizedOracleDDL = strtolower($this->normalizeDDL($postgresDDL));
+                    // Verificar si la tabla existe
+                    if ($normalizedPostgresDDL !== $normalizedOracleDDL) {
+                        // Eliminar la tabla existente
+                        DB::connection('pgsql')->statement("DROP TABLE IF EXISTS public.$tablePgsql CASCADE");
+
+                        // Crear la nueva tabla
+                        DB::connection('pgsql')->statement($postgresDDL);
+                        $this->migrateData($tableName);
+
+                        $mensaje = 'La tabla ' . $tablePgsql . ' ha sido actualizada correctamente.';
+                    } else {
+                        // Si los DDLs coinciden, no hacer nada
+                        $mensaje = 'La tabla ' . $tablePgsql . ' ya está actualizada, no se realizaron cambios.';
+                    }
                 }
             } else {
                 // Convertir el nombre de la tabla a minúsculas
@@ -356,8 +432,12 @@ class MigrationController extends Controller
                 $postgresDDL = $this->transformTableAndColumnNames($postgresDDL);
 
                 // Ejecuta el DDL convertido en PostgreSQL
-                DB::connection('pgsql')->statement($postgresDDL);
-                $mensaje = 'Migración completada';
+                if ($migrationCustomize == true) {
+                    return $postgresDDL;
+                } else {
+                    DB::connection('pgsql')->statement($postgresDDL);
+                    $mensaje = 'Migración completada';
+                }
             }
             // GUARDA REGISTRO DE MIGRACION
             $this->registerMigration($this->toLowerCase($tableName), $tipo);

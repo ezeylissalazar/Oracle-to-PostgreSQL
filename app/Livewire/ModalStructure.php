@@ -2,6 +2,7 @@
 
 namespace App\Livewire;
 
+use App\Http\Controllers\MigrationController;
 use Illuminate\Support\Facades\DB;
 use Livewire\Attributes\On;
 
@@ -11,41 +12,76 @@ class ModalStructure extends Component
 {
 
     public $isOpen = false;
-    public $tableName = '';
+    public $tableName;
+    public $newTableName;
+    public $postgresDDL;
+    public $tableNameOracle;
     public $oracleFields = []; // Para almacenar los campos de la tabla de Oracle
     public $newFields = []; // Para almacenar los nuevos nombres de los campos
     protected $listeners = ['name-table' => 'botonAdded'];
 
+
     #[On('name-table')]
     public function botonAdded($nameTable)
     {
-        $this->tableName = $nameTable;
+        // Obtener el DDL convertido a PostgreSQL
+        $this->postgresDDL = '';
+        $this->postgresDDL = app(MigrationController::class)->migrateStructureToPostgres($nameTable, true);
+        $postgresDDL = $this->postgresDDL;
+        // Extraer el nombre de la tabla convertida (lo que está después de 'create table "public"."')
+        preg_match('/create table "public"\."(.*?)"/', $postgresDDL, $matches);
+        $this->tableName = $matches[1] ?? $nameTable; // Si no se encuentra el nombre, usamos el original
 
-        // Realizar la consulta a la base de datos Oracle para obtener los campos de la tabla
-        // Asegúrate de tener una conexión adecuada a tu base de datos Oracle configurada en config/database.php
-        $oracleConnection = 'oracle'; // Ajusta esto según tu configuración de conexión
-        $query = "SELECT column_name FROM all_tab_columns WHERE table_name = UPPER(?)"; // Consulta Oracle
-        $fields = DB::connection($oracleConnection)->select($query, [$nameTable]);
+        $this->newTableName = $this->tableName;
+        $this->tableNameOracle = $nameTable;
+        // Extraer los nombres de los campos convertidos (lo que está entre las comillas dobles)
+        preg_match_all('/\t"(.*?)"/', $postgresDDL, $fieldMatches);
+        $convertedFields = $fieldMatches[1];
 
-        // Asignar los campos obtenidos a la propiedad $oracleFields
-        $this->oracleFields = $fields;
+        // Inicializar los inputs para los nuevos nombres de campo (solo usando PostgreSQL)
+        $this->newFields = array_map(function ($field) use ($convertedFields) {
+            return [
+                'original' => $field, // El nombre del campo original
+                'new' => $field,      // El nombre del campo convertido a PostgreSQL
+            ];
+        }, $convertedFields);
 
-        // Inicializar los inputs para los nuevos nombres de campo
-        $this->newFields = array_map(function ($field) {
-            return ['original' => $field->column_name, 'new' => '']; // Inicializamos los inputs vacíos
-        }, $fields);
-
-        $this->isOpen = true; // Abrir el modal
+        // Abrir el modal
+        $this->isOpen = true;
     }
+
 
     public function saveChanges()
     {
-        // Guardar los nuevos nombres de los campos
-        // Aquí puedes agregar la lógica para guardar los cambios en tu base de datos, por ejemplo:
-        // foreach ($this->newFields as $field) {
-        //     // Lógica para guardar $field['new'] en la base de datos
-        // }
-        // Una vez guardado, puedes cerrar el modal
+        $tableName = $this->tableName;
+        $newTableName = $this->newTableName;
+        $newFields = $this->newFields;
+        $postgresDDL = $this->postgresDDL;
+    
+        foreach ($newFields as $index => $field) {
+            // Si el campo es clave primaria
+            if (strpos($postgresDDL, 'primary key ("' . $field['original'] . '"') !== false) {
+                // Cambiar el nombre de la columna en la tabla
+                $postgresDDL = preg_replace('/"public"\."' . preg_quote($field['original'], '/') . '"/', '"public"."' . $field['new'] . '"', $postgresDDL);
+                // Cambiar el nombre de la columna en la clave primaria
+                $postgresDDL = preg_replace('/primary key \("'. preg_quote($field['original'], '/') . '"\)/', 'primary key ("'. $field['new'] . '")', $postgresDDL);
+            }
+            // Si el campo es clave foránea
+            elseif (strpos($postgresDDL, 'REFERENCES "public"."' . $field['original'] . '"') !== false) {
+                // Solo cambiar el nombre de la columna en la clave foránea
+                $postgresDDL = preg_replace('/"public"\."' . preg_quote($field['original'], '/') . '"/', '"public"."' . $field['new'] . '"', $postgresDDL);
+            }
+            // Si es un campo normal (ni clave primaria ni clave foránea)
+            else {
+                // Cambiar el nombre de la columna normal
+                $postgresDDL = preg_replace('/"public"\."' . preg_quote($field['original'], '/') . '"/', '"public"."' . $field['new'] . '"', $postgresDDL);
+            }
+        }
+    
+        // Ver el resultado para debugging
+        dd($postgresDDL, $newTableName, $tableName);
+    
+        // Desactivar el modal
         $this->isOpen = false;
     }
 

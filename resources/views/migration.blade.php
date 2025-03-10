@@ -4,12 +4,12 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Migracion Oracle to PostgreSQL</title>
+    <title>BIIP MIDDLE</title>
     <link href="{{ asset('assets/css/fonts.css') }}" rel="stylesheet" />
     <link rel="stylesheet" href="{{ asset('assets/css/tailwind.output.css') }}" />
     <link rel="stylesheet" href="{{ asset('assets/css/chart.min.css') }}" />
+    {{-- <link rel="icon" type="image/x-icon" href="https://framework.digital.gob.cl/img/favicon/favicon-32x32.png"> --}}
     @livewireStyles
-
 </head>
 
 <body>
@@ -98,7 +98,7 @@
                                     @foreach ($oracleTables as $table)
                                         @php
                                             $tableNameLower = strtolower($table->table_name); // Convertimos el nombre de Oracle a minúsculas
-                                            $isMigrated = in_array($tableNameLower, $migratedTables);
+                                            $isMigrated = [];
                                         @endphp
                                         <tr class="text-gray-700 dark:text-gray-400">
                                             <td class="px-4 py-3 text-sm">{{ $table->schema_name }}</td>
@@ -115,16 +115,15 @@
                                                 @endif
                                             </td>
                                             <td class="px-4 py-3 text-sm">
-                                                @if ($isMigrated && isset($pgsqlTables[$tableNameLower]))
+                                                @if (isset($pgsqlTables[$tableNameLower]))
                                                     {{ $pgsqlTables[$tableNameLower] }} {{-- Nombre real en PostgreSQL --}}
                                                 @else
                                                     <span class="text-gray-500">Sin migración</span>
                                                 @endif
                                             </td>
-
-
+                                            
                                             <td class="px-4 py-3 text-sm">
-                                                @if ($isMigrated && isset($pgsqlColumns[$tableNameLower]))
+                                                @if (isset($pgsqlColumns[$tableNameLower]) && count($pgsqlColumns[$tableNameLower]) > 0)
                                                     <ul>
                                                         @foreach ($pgsqlColumns[$tableNameLower] as $column)
                                                             <li>{{ $column->column_name }}</li>
@@ -134,10 +133,11 @@
                                                     <span class="text-gray-500">Sin migración</span>
                                                 @endif
                                             </td>
+                                            
                                             <td class="px-4 py-3 text-sm">
                                                 <div class="flex flex-col items-center justify-center w-full space-y-2">
                                                     {{-- Botón para migrar estructura (Funcion Generica) --}}
-                                                    <form
+                                                    {{-- <form
                                                         action="{{ route('migration.migrateStructure', ['table' => $table->table_name]) }}"
                                                         method="POST" class="w-full">
                                                         @csrf
@@ -145,24 +145,11 @@
                                                             class="w-full flex items-center justify-center px-4 py-2 text-sm font-medium leading-5 text-white transition-colors duration-150 bg-blue-600 border border-transparent rounded-lg active:bg-blue-600 hover:bg-blue-700 focus:outline-none focus:shadow-outline-blue">
                                                             Migrar Estructura Generica
                                                         </button>
-                                                    </form>
+                                                    </form> --}}
                                                     {{-- Botón para migrar estructura (Funcion Separada)  --}}
-                                                  
-                                                    <livewire:boton-modal table="{{ $table->table_name }}"/>
+                                                    <livewire:boton-modal table="{{ $table->table_name }}" />
+                                                    <livewire:boton-data table="{{ $table->table_name }}" />
 
-
-
-
-                                                    {{-- Botón para migrar datos --}}
-                                                    <form
-                                                        action="{{ route('migration.migrateData', ['table' => $table->table_name]) }}"
-                                                        method="POST" class="w-full">
-                                                        @csrf
-                                                        <button
-                                                            class="w-full flex items-center justify-center px-4 py-2 text-sm font-medium leading-5 text-white transition-colors duration-150 bg-teal-600 border border-transparent rounded-lg active:bg-teal-600 hover:bg-green-700 focus:outline-none focus:shadow-outline-green">
-                                                            Migrar Datos
-                                                        </button>
-                                                    </form>
                                                     @if ($isMigrated)
                                                         <span
                                                             class="text-green-500 font-semibold text-center">Migrada</span>
@@ -174,6 +161,7 @@
                                 </tbody>
                             </table>
                             <livewire:modal-structure />
+                            <livewire:modal-data />
 
 
                         </div>

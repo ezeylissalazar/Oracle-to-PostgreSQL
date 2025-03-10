@@ -10,10 +10,8 @@ class HistoryMigration extends Model
     protected $table = 'history_migrations';
 
     protected $fillable = [
-        'migrated_table',
-        'fecha_migration',
+        'migrated_table_pgsql',
+        'migrated_table_oracle',
         'tipo_migracion',
-        'cantidad_migracion',
-        'updated_at',
     ];
 }

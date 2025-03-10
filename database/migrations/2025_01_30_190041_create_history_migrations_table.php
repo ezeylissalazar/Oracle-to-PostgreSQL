@@ -13,9 +13,8 @@ return new class extends Migration
     {
         Schema::create('history_migrations', function (Blueprint $table) {
             $table->id();
-            $table->string('migrated_table');
-            $table->date('fecha_migration');
-            $table->integer('cantidad_migracion')->default(1);
+            $table->string('migrated_table_pgsql');
+            $table->string('migrated_table_oracle');
             $table->string('tipo_migracion');
             $table->timestamps();
         });
