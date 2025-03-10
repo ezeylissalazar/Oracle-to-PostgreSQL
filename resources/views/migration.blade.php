@@ -8,7 +8,7 @@
     <link href="{{ asset('assets/css/fonts.css') }}" rel="stylesheet" />
     <link rel="stylesheet" href="{{ asset('assets/css/tailwind.output.css') }}" />
     <link rel="stylesheet" href="{{ asset('assets/css/chart.min.css') }}" />
-    {{-- <link rel="icon" type="image/x-icon" href="https://framework.digital.gob.cl/img/favicon/favicon-32x32.png"> --}}
+    <link rel="icon" type="image/x-icon" href="{{ asset('assets/img/icon.png') }}">
     @livewireStyles
 </head>
 
